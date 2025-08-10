@@ -20,21 +20,26 @@ warnings.filterwarnings('ignore')
 ## LLM
 def get_llm():
     model_id = 'mistralai/mixtral-8x7b-instruct-v01'
+
+    # Generation parameters
     parameters = {
-        .......,
-        .......,
+        GenParams.MAX_NEW_TOKENS: 512,   # Max tokens to generate
+        GenParams.TEMPERATURE: 0.7,      # Creativity vs. determinism
+        GenParams.TOP_K: 50,             # Top-K sampling
+        GenParams.TOP_P: 0.9,             # Nucleus sampling
     }
+
     project_id = "skills-network"
+
     watsonx_llm = WatsonxLLM(
-        model_id=......,
+        model_id=model_id,
         url="https://us-south.ml.cloud.ibm.com",
-        project_id=.......,
-        params=.....,
+        project_id=project_id,
+        params=parameters,
     )
     return watsonx_llm
 
     ## Document loader
-from langchain_community.document_loaders import PyPDFLoader
 
 def document_loader(file):
     # Create the loader for the PDF
@@ -44,3 +49,101 @@ def document_loader(file):
     loaded_document = loader.load()
     
     return loaded_document
+
+## Text splitter
+
+def text_splitter(data):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,           # max tokens/characters per chunk
+        chunk_overlap=200,         # overlap between chunks to keep context
+        length_function=len        # function to measure length (usually len for characters)
+    )
+    chunks = text_splitter.split_documents(data)
+    return chunks
+
+#embed model
+def watsonx_embedding():
+    # Define model-specific parameters (optional)
+    embed_params = {
+        EmbedParamsMeta.TRUNCATE_INPUT_TOKENS: 3,
+        EmbedParamsMeta.RETURN_OPTIONS: {"input_text": True},
+    }
+
+    # Initialize the WatsonxEmbeddings object
+    watsonx_embedding = WatsonxEmbeddings(
+        model_id="ibm/granite-embedding-107m-multilingual",  # or another embedding model
+        url="https://us-south.ml.cloud.ibm.com",            # your instance URL
+        project_id="project_id",                        # replace with your actual project ID
+        params=embed_params,
+    )
+    return watsonx_embedding
+
+## Vector db
+def vector_database(chunks):
+    embedding_model = watsonx_embedding()
+    vectordb = Chroma.from_documents(
+        documents=chunks,            # The split document chunks
+        embedding=embedding_model    # The embedding function
+    )
+    return vectordb
+
+## Retriever
+def retriever(file):
+    # 1. Load the document (PDF loader, etc.)
+    splits = document_loader(file)
+    
+    # 2. Split into smaller chunks for embedding
+    chunks = text_splitter(splits)
+    
+    # 3. Create / load the vector database from chunks
+    vectordb = vector_database(chunks)
+    
+    # 4. Turn the vector DB into a retriever object
+    retriever = vectordb.as_retriever()
+    
+    return retriever
+
+## QA Chain
+def retriever_qa(file, query):
+    llm = get_llm()
+    retriever_obj = retriever(file)
+    
+    qa = RetrievalQA.from_chain_type(
+        llm=llm, 
+        chain_type="stuff",             # "stuff" simply feeds retrieved docs directly to the LLM
+        retriever=retriever_obj, 
+        return_source_documents=True    # True if you want to see which docs were used
+    )
+    
+    response = qa.invoke({"query": query})
+    return response['result']
+
+import gradio as gr
+
+# Create Gradio interface
+rag_application = gr.Interface(
+    fn=retriever_qa,                     # The main function that runs the QA
+    allow_flagging="never",               # Disable flagging
+    inputs=[
+        gr.File(
+            label="Upload PDF File", 
+            file_count="single", 
+            file_types=['.pdf'], 
+            type="filepath"
+        ),  # PDF upload
+        gr.Textbox(
+            label="Input Query", 
+            lines=2, 
+            placeholder="Type your question here..."
+        )
+    ],
+    outputs=gr.Textbox(label="Answer"),   # Output is the bot's answer
+    title="PDF Question Answering Bot",
+    description="Upload a PDF document and ask any question. The chatbot will try to answer using the provided document."
+)
+
+# Launch the app
+rag_application.launch(
+    server_name="0.0.0.0",   # Allows access from any network interface
+    server_port=7860         # Runs on port 7860
+)
